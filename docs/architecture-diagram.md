@@ -1,6 +1,6 @@
 # Architecture Diagram
 
-This is a text representation of the architecture. Replace this with an actual diagram before final submission.
+**TODO:** Before final submission, convert this text diagram to an actual PNG image using a tool like draw.io, Lucidchart, or AWS Architecture Icons.
 
 ```
 ┌───────────────┐     ┌────────────────┐     ┌────────────────┐     ┌───────────────┐

@@ -2,6 +2,7 @@ import json
 import boto3
 import os
 import logging
+import re
 from botocore.exceptions import ClientError
 
 # Configure logging
@@ -47,8 +48,14 @@ def lambda_handler(event, context):
                 'body': json.dumps('File already decrypted, skipping')
             }
         
+        # Sanitize the filename to prevent path traversal attacks
+        filename = os.path.basename(object_key)
+        safe_filename = sanitize_filename(filename)
+        if safe_filename != filename:
+            logger.warning(f"Filename was sanitized from '{filename}' to '{safe_filename}'")
+            
         # Download the encrypted file
-        download_path = f"/tmp/{os.path.basename(object_key)}"
+        download_path = f"/tmp/{safe_filename}"
         s3_client.download_file(bucket_name, object_key, download_path)
         logger.info(f"Downloaded file to {download_path}")
         
@@ -92,6 +99,28 @@ def lambda_handler(event, context):
             'statusCode': 500,
             'body': json.dumps(f"Error decrypting file: {str(e)}")
         }
+
+def sanitize_filename(filename):
+    """
+    Sanitize a filename to prevent path traversal attacks and other security issues.
+    
+    Args:
+        filename: The original filename
+        
+    Returns:
+        str: Sanitized filename
+    """
+    # Remove path components and keep only the filename
+    filename = os.path.basename(filename)
+    
+    # Replace potentially dangerous characters with underscores
+    filename = re.sub(r'[^\w\.-]', '_', filename)
+    
+    # Ensure the filename is not empty
+    if not filename:
+        filename = "unnamed_file"
+        
+    return filename
 
 def decrypt_file(file_path):
     """

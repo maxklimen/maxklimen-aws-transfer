@@ -11,7 +11,7 @@ The solution implements the following workflow:
 4. The EventBridge rule invokes a Lambda function
 5. The Lambda function decrypts the file and stores the decrypted version in a designated S3 location
 
-![Architecture Diagram](docs/architecture-diagram.png)
+![Architecture Diagram](docs/architecture-diagram.md)
 
 ## Components
 
@@ -34,6 +34,8 @@ The solution implements the following workflow:
    git clone https://github.com/your-username/aws-transfer-decrypt.git
    cd aws-transfer-decrypt
    ```
+   
+   > **Note:** Replace `your-username` with your actual GitHub username.
 
 2. Deploy the CloudFormation stack:
    ```bash
@@ -81,7 +83,7 @@ aws-transfer-decrypt/
 ├── lambda/               # Lambda function code
 │   └── decrypt_function.py   # Decryption function
 ├── docs/                 # Documentation
-│   └── architecture-diagram.png  # Architecture diagram
+│   └── architecture-diagram.md  # Architecture diagram
 ├── tests/                # Test files and scripts
 │   └── test_lambda.py    # Lambda function tests
 └── README.md             # This file

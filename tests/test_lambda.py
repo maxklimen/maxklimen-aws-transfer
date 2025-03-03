@@ -117,5 +117,22 @@ class TestLambdaFunction(unittest.TestCase):
         self.assertEqual(response['statusCode'], 500)
         self.assertIn('Error', response['body'])
 
+    def test_sanitize_filename(self):
+        """Test the filename sanitization function."""
+        # Normal filename
+        self.assertEqual(decrypt_function.sanitize_filename("normal.txt"), "normal.txt")
+        
+        # Path traversal attempt
+        self.assertEqual(decrypt_function.sanitize_filename("../../../etc/passwd"), "passwd")
+        
+        # File with invalid characters
+        self.assertEqual(decrypt_function.sanitize_filename("file; with bad chars"), "file__with_bad_chars")
+        
+        # Empty filename
+        self.assertEqual(decrypt_function.sanitize_filename(""), "unnamed_file")
+        
+        # File with spaces
+        self.assertEqual(decrypt_function.sanitize_filename("my file.txt"), "my_file.txt")
+
 if __name__ == '__main__':
     unittest.main() 
