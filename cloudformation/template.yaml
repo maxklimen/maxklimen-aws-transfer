@@ -1,0 +1,345 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Transfer Family SFTP server with Lambda decryption function triggered by EventBridge'
+
+Parameters:
+  SFTPUserName:
+    Type: String
+    Default: sftp-user
+    Description: Username for SFTP user
+    MinLength: 3
+    MaxLength: 32
+    AllowedPattern: "[a-zA-Z0-9-]+"
+    ConstraintDescription: Must contain only alphanumeric characters or hyphens
+
+  SFTPUserPublicKey:
+    Type: String
+    Description: The public SSH key for the SFTP user (SSH-RSA format)
+    Default: ""
+    NoEcho: false
+
+  BucketPrefix:
+    Type: String
+    Default: sftp-transfer
+    Description: Prefix for the S3 bucket name
+
+Resources:
+  # S3 Bucket to store files uploaded via SFTP
+  TransferBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${BucketPrefix}-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+
+  # IAM Role for Transfer Family Service
+  TransferServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: transfer.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSTransferLoggingAccess
+      Path: /service-role/
+
+  # IAM Role for SFTP User
+  SFTPUserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: transfer.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+
+  # IAM Policy for SFTP User
+  SFTPUserPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: SFTPUserS3Access
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource: !GetAtt TransferBucket.Arn
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+              - s3:GetObjectVersion
+              - s3:DeleteObjectVersion
+            Resource: !Sub "${TransferBucket.Arn}/*"
+      Roles:
+        - !Ref SFTPUserRole
+
+  # AWS Transfer Family SFTP Server
+  TransferServer:
+    Type: AWS::Transfer::Server
+    Properties:
+      Domain: S3
+      EndpointType: PUBLIC
+      IdentityProviderType: SERVICE_MANAGED
+      LoggingRole: !GetAtt TransferServiceRole.Arn
+      Protocols:
+        - SFTP
+      SecurityPolicyName: TransferSecurityPolicy-2020-06
+      Tags:
+        - Key: Name
+          Value: SFTPTransferServer
+
+  # SFTP User
+  SFTPUser:
+    Type: AWS::Transfer::User
+    DependsOn: SFTPUserPolicy
+    Properties:
+      ServerId: !Ref TransferServer
+      UserName: !Ref SFTPUserName
+      HomeDirectory: !Sub "/${TransferBucket.Name}"
+      Role: !GetAtt SFTPUserRole.Arn
+      SshPublicKeys:
+        - !Ref SFTPUserPublicKey
+      Tags:
+        - Key: Name
+          Value: !Ref SFTPUserName
+
+  # IAM Role for Lambda Function
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Path: /service-role/
+
+  # IAM Policy for Lambda S3 Access
+  LambdaS3AccessPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: LambdaS3Access
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+            Resource:
+              - !GetAtt TransferBucket.Arn
+              - !Sub "${TransferBucket.Arn}/*"
+      Roles:
+        - !Ref LambdaExecutionRole
+
+  # Lambda Function for Decryption
+  DecryptionLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: SFTPFileDecryption
+      Handler: decrypt_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Timeout: 300
+      MemorySize: 256
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import logging
+          from botocore.exceptions import ClientError
+
+          # Configure logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # Initialize S3 client
+          s3_client = boto3.client('s3')
+
+          def lambda_handler(event, context):
+              """
+              Lambda function that decrypts files uploaded to S3 via AWS Transfer Family.
+              
+              Args:
+                  event: The event dict from EventBridge
+                  context: Lambda context
+              
+              Returns:
+                  dict: Response with status and details
+              """
+              logger.info(f"Received event: {json.dumps(event)}")
+              
+              try:
+                  # Extract bucket and key information from the event
+                  # For S3 events through EventBridge
+                  if 'detail' in event and 'bucket' in event['detail'] and 'object' in event['detail']:
+                      bucket_name = event['detail']['bucket']['name']
+                      object_key = event['detail']['object']['key']
+                  else:
+                      logger.error("Invalid event structure: Missing required fields")
+                      return {
+                          'statusCode': 400,
+                          'body': json.dumps('Invalid event structure')
+                      }
+                  
+                  logger.info(f"Processing file s3://{bucket_name}/{object_key}")
+                  
+                  # Skip processing already decrypted files to avoid recursion
+                  if object_key.startswith('decrypted/'):
+                      logger.info(f"Skipping already decrypted file: {object_key}")
+                      return {
+                          'statusCode': 200,
+                          'body': json.dumps('File already decrypted, skipping')
+                      }
+                  
+                  # Download the encrypted file
+                  download_path = f"/tmp/{os.path.basename(object_key)}"
+                  s3_client.download_file(bucket_name, object_key, download_path)
+                  logger.info(f"Downloaded file to {download_path}")
+                  
+                  # Perform decryption (mock implementation)
+                  decrypted_path = decrypt_file(download_path)
+                  logger.info(f"Decrypted file saved at {decrypted_path}")
+                  
+                  # Upload the decrypted file back to S3
+                  decrypted_key = f"decrypted/{object_key}"
+                  s3_client.upload_file(decrypted_path, bucket_name, decrypted_key)
+                  logger.info(f"Uploaded decrypted file to s3://{bucket_name}/{decrypted_key}")
+                  
+                  # Clean up temporary files
+                  os.remove(download_path)
+                  os.remove(decrypted_path)
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': 'File decryption successful',
+                          'source': {
+                              'bucket': bucket_name,
+                              'key': object_key
+                          },
+                          'destination': {
+                              'bucket': bucket_name,
+                              'key': decrypted_key
+                          }
+                      })
+                  }
+                  
+              except ClientError as e:
+                  logger.error(f"S3 error: {e}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f"Error processing S3 object: {str(e)}")
+                  }
+              except Exception as e:
+                  logger.error(f"Error decrypting file: {e}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f"Error decrypting file: {str(e)}")
+                  }
+
+          def decrypt_file(file_path):
+              """
+              Mock decryption function. In a real-world scenario, this would
+              implement actual decryption logic such as PGP, AES, etc.
+              
+              Args:
+                  file_path: Path to the encrypted file
+                  
+              Returns:
+                  str: Path to the decrypted file
+              """
+              output_path = f"{file_path}.decrypted"
+              
+              # For demonstration purposes, we're just copying the file
+              # In a real implementation, this would decrypt the file
+              with open(file_path, 'rb') as src_file:
+                  with open(output_path, 'wb') as dest_file:
+                      # In a real implementation, this would be:
+                      # dest_file.write(decrypt(src_file.read()))
+                      dest_file.write(src_file.read())
+              
+              logger.info(f"Mock decryption completed for {file_path}")
+              return output_path
+
+  # EventBridge Rule for S3 Object Created
+  S3ObjectCreatedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: S3FileUploadedRule
+      Description: "Rule to trigger Lambda when file is uploaded to S3 bucket via SFTP"
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        detail:
+          bucket:
+            name:
+              - !Ref TransferBucket
+          object:
+            key:
+              - prefix: ""
+              - anything-but:
+                - prefix: "decrypted/"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt DecryptionLambda.Arn
+          Id: DecryptionLambdaTarget
+
+  # Permission for EventBridge to invoke Lambda
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref DecryptionLambda
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt S3ObjectCreatedRule.Arn
+
+Outputs:
+  TransferServerId:
+    Description: ID of the SFTP Transfer Server
+    Value: !Ref TransferServer
+
+  TransferServerEndpoint:
+    Description: Endpoint of the SFTP Transfer Server
+    Value: !Sub "${TransferServer.ServerId}.server.transfer.${AWS::Region}.amazonaws.com"
+
+  SFTPUser:
+    Description: SFTP Username
+    Value: !Ref SFTPUserName
+
+  S3BucketName:
+    Description: Name of the S3 bucket for SFTP transfers
+    Value: !Ref TransferBucket
+
+  LambdaFunction:
+    Description: Decryption Lambda Function
+    Value: !Ref DecryptionLambda 

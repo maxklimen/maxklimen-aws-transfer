@@ -1,0 +1,26 @@
+This is a sample file for testing the AWS Transfer Family SFTP service and Lambda decryption function.
+
+When you upload this file to the SFTP server, the following should happen:
+1. File is stored in the S3 bucket
+2. EventBridge rule detects the upload
+3. Lambda function is triggered
+4. Lambda function "decrypts" this file (mock implementation)
+5. Decrypted file is stored in the S3 bucket under the "decrypted/" prefix
+
+To use this file:
+1. Connect to your SFTP server using your SSH key
+2. Upload this file
+3. Check the S3 bucket in the AWS Management Console
+4. Verify that a decrypted version appears in the decrypted/ prefix
+
+If you'd like to test with a realistic encrypted file, you can encrypt this 
+file using gpg or another encryption tool before uploading it to the SFTP server.
+
+For example:
+```
+gpg --symmetric --cipher-algo AES256 sample-file.txt
+```
+
+Then upload the resulting sample-file.txt.gpg file to the SFTP server.
+In a real implementation, the Lambda function would have the necessary
+decryption keys to process the file. 
